@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AquaBeep Timer</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @layer base { body { background-color: #020617; } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // Paste the exact JavaScript logic inside the script tag
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+          const [isRunning, setIsRunning] = useState(false);
+          const [seconds, setSeconds] = useState(0);
+          const [volume, setVolume] = useState(0.8);
+          const [showHelp, setShowHelp] = useState(false);
+          const [wakeLockActive, setWakeLockActive] = useState(false);
+          const [testBeepActive, setTestBeepActive] = useState(false);
+
+          const timerRef = useRef(null);
+          const startTimeRef = useRef(null);
+          const accumulatedTimeRef = useRef(0);
+          const audioCtxRef = useRef(null);
+          const silentNodeRef = useRef(null);
+          const lastTriggeredSecondRef = useRef(-1);
+          const wakeLockRef = useRef(null);
+
+          const initAudio = () => {
+            if (!audioCtxRef.current) {
+              audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtxRef.current.state === 'suspended') {
+              audioCtxRef.current.resume();
+            }
+            try {
+              if (!silentNodeRef.current) {
+                const buffer = audioCtxRef.current.createBuffer(1, 44100, 44100);
+                const source = audioCtxRef.current.createBufferSource();
+                source.buffer = buffer;
+                source.loop = true;
+                const gainNode = audioCtxRef.current.createGain();
+                gainNode.gain.setValueAtTime(0.001, audioCtxRef.current.currentTime);
+                source.connect(gainNode);
+                gainNode.connect(audioCtxRef.current.destination);
+                source.start();
+                silentNodeRef.current = source;
+              }
+            } catch (e) { console.warn(e); }
+          };
+
+          const triggerBeepSequence = (count, frequency = 880) => {
+            initAudio();
+            const ctx = audioCtxRef.current;
+            if (!ctx || volume === 0) return;
+            let now = ctx.currentTime;
+            const duration = 0.12;
+            const gap = 0.12;
+
+            for (let i = 0; i < count; i++) {
+              const osc = ctx.createOscillator();
+              const gainNode = ctx.createGain();
+              osc.type = 'sine';
+              osc.frequency.setValueAtTime(frequency, now);
+              gainNode.gain.setValueAtTime(0, now);
+              gainNode.gain.linearRampToValueAtTime(volume, now + 0.02);
+              gainNode.gain.setValueAtTime(volume, now + duration - 0.02);
+              gainNode.gain.linearRampToValueAtTime(0, now + duration);
+              osc.connect(gainNode);
+              gainNode.connect(ctx.destination);
+              osc.start(now);
+              osc.stop(now + duration);
+              now += duration + gap;
+            }
+          };
+
+          const requestWakeLock = async () => {
+            if (!('wakeLock' in navigator)) return;
+            try {
+              wakeLockRef.current = await navigator.wakeLock.request('screen');
+              setWakeLockActive(true);
+            } catch (err) { setWakeLockActive(false); }
+          };
+
+          const releaseWakeLock = async () => {
+            if (wakeLockRef.current) {
+              try {
+                await wakeLockRef.current.release();
+                wakeLockRef.current = null;
+                setWakeLockActive(false);
+              } catch (err) { console.error(err); }
+            }
+          };
+
+          const handleToggle = () => {
+            if (isRunning) {
+              clearInterval(timerRef.current);
+              accumulatedTimeRef.current += Date.now() - startTimeRef.current;
+              setIsRunning(false);
+              releaseWakeLock();
+            } else {
+              initAudio();
+              triggerBeepSequence(1, 600);
+              startTimeRef.current = Date.now();
+              setIsRunning(true);
+              requestWakeLock();
+              timerRef.current = setInterval(() => {
+                const elapsedMs = accumulatedTimeRef.current + (Date.now() - startTimeRef.current);
+                const elapsedSecs = Math.floor(elapsedMs / 1000);
+                setSeconds(elapsedSecs);
+                checkAndBeep(elapsedSecs);
+              }, 200);
+            }
+          };
+
+          const handleReset = () => {
+            clearInterval(timerRef.current);
+            setIsRunning(false);
+            setSeconds(0);
+            accumulatedTimeRef.current = 0;
+            lastTriggeredSecondRef.current = -1;
+            releaseWakeLock();
+          };
+
+          const checkAndBeep = (currentSec) => {
+            if (currentSec === lastTriggeredSecondRef.current) return;
+            if (currentSec <= 180) {
+              if (currentSec > 0 && currentSec % 30 === 0) {
+                triggerBeepSequence(Math.floor(currentSec / 30), 880);
+                lastTriggeredSecondRef.current = currentSec;
+              }
+            } else {
+              const phase2Secs = currentSec - 180;
+              if (phase2Secs > 0 && phase2Secs % 15 === 0) {
+                triggerBeepSequence(Math.floor(phase2Secs / 15), 1200);
+                lastTriggeredSecondRef.current = currentSec;
+              }
+            }
+          };
+
+          const formatTime = (totalSecs) => {
+            const m = Math.floor(totalSecs / 60).toString().padStart(2, '0');
+            const s = (totalSecs % 60).toString().padStart(2, '0');
+            return `${m}:${s}`;
+          };
+
+          const getBrushingStep = (currentSecs) => {
+            if (currentSecs < 30) return { title: "Top-Right Outer Surfaces", progress: currentSecs / 30 };
+            if (currentSecs < 60) return { title: "Top-Left Outer Surfaces", progress: (currentSecs - 30) / 30 };
+            if (currentSecs < 90) return { title: "Bottom-Right Outer Surfaces", progress: (currentSecs - 60) / 30 };
+            if (currentSecs < 120) return { title: "Bottom-Left Outer Surfaces", progress: (currentSecs - 90) / 30 };
+            if (currentSecs < 150) return { title: "Top Chewing Surfaces", progress: (currentSecs - 120) / 30 };
+            if (currentSecs <= 180) return { title: "Bottom Chewing Surfaces", progress: (currentSecs - 150) / 30 };
+            const phase2Secs = currentSecs - 180;
+            return { title: "Phase 2: Deep Custom Detailing!", progress: (phase2Secs % 15) / 15 };
+          };
+
+          const brushingStep = getBrushingStep(seconds);
+          const isPhase2 = seconds > 180;
+
+          const getNextBeepInfo = () => {
+            if (seconds < 180) {
+              const nextTarget = Math.ceil((seconds + 0.1) / 30) * 30;
+              const count = nextTarget / 30;
+              return { time: formatTime(nextTarget), count };
+            } else {
+              const nextTarget = 180 + Math.ceil(((seconds - 180) + 0.1) / 15) * 15;
+              return { time: formatTime(nextTarget), count: Math.floor((nextTarget - 180) / 15) };
+            }
+          };
+
+          const nextBeep = getNextBeepInfo();
+
+          return (
+            <div className="min-h-screen text-slate-100 flex flex-col justify-between p-6 md:p-12 font-sans select-none max-w-md mx-auto w-full">
+              <header className="flex justify-between items-center w-full mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="bg-cyan-500/10 p-2.5 rounded-2xl border border-cyan-500/20 text-cyan-400">💧</div>
+                  <div>
+                    <h1 className="font-extrabold text-xl tracking-tight text-white">AquaBeep</h1>
+                    <p className="text-xs text-slate-400">Lock-Screen Protected Timer</p>
+                  </div>
+                </div>
+              </header>
+
+              <main className="w-full flex-grow flex flex-col justify-center gap-6">
+                <div className="flex gap-2 justify-center">
+                  <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs px-3 py-1 rounded-full font-medium">
+                    ● Sound Wave Keep-Alive Active
+                  </span>
+                </div>
+
+                <div className="relative flex flex-col items-center justify-center p-8 bg-slate-900/60 rounded-3xl border border-slate-800 shadow-2xl">
+                  <span className={`text-xs uppercase tracking-widest font-bold ${isPhase2 ? 'text-fuchsia-400' : 'text-cyan-400'}`}>
+                    {isPhase2 ? "Phase 2: 15s Sweeps" : "Phase 1: 30s Quadrants"}
+                  </span>
+                  <div className="text-7xl font-black tracking-tight text-white my-2 font-mono">
+                    {formatTime(seconds)}
+                  </div>
+                  <div className="text-sm font-semibold text-slate-300 bg-slate-950 px-4 py-1.5 rounded-full border border-slate-800 inline-block">
+                    {brushingStep.title}
+                  </div>
+
+                  <div className="w-full mt-6 bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
+                    <div className={`h-full transition-all duration-300 ${isPhase2 ? 'bg-fuchsia-500' : 'bg-cyan-500'}`} style={{ width: `${brushingStep.progress * 100}%` }} />
+                  </div>
+                </div>
+
+                <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 flex justify-between items-center text-sm">
+                  <div>
+                    <p className="text-slate-400 text-xs">Next sound alert</p>
+                    <p className="font-semibold text-white">{nextBeep.time} ({nextBeep.count} beep{nextBeep.count > 1 ? 's' : ''})</p>
+                  </div>
+                  <div className="flex gap-1">
+                    {[...Array(Math.min(nextBeep.count, 4))].map((_, i) => (
+                      <span key={i} className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex gap-4 items-center">
+                  <button onClick={handleReset} className="flex-1 bg-slate-900 text-slate-300 font-bold py-4 rounded-xl border border-slate-800 active:scale-95 transition-all">
+                    Reset
+                  </button>
+                  <button onClick={handleToggle} className={`flex-2 px-8 py-4 rounded-xl font-black text-lg active:scale-95 transition-all ${isRunning ? 'bg-rose-500 text-white' : 'bg-cyan-400 text-slate-950'}`}>
+                    {isRunning ? 'Pause' : 'Start Brushing'}
+                  </button>
+                </div>
+
+                <div className="bg-slate-900/60 border border-slate-850 p-5 rounded-2xl flex flex-col gap-3">
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold text-slate-300 text-sm">Volume Slider</span>
+                    <span className="font-mono text-cyan-400 font-bold text-xs">{Math.round(volume * 100)}%</span>
+                  </div>
+                  <div className="flex gap-4 items-center">
+                    <input type="range" min="0" max="1" step="0.05" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="flex-grow accent-cyan-400 h-1.5 bg-slate-950 rounded-lg" />
+                    <button onClick={() => triggerBeepSequence(2, 880)} className="bg-slate-950 border border-slate-800 text-xs font-bold text-cyan-400 px-3 py-1.5 rounded-lg">Test</button>
+                  </div>
+                </div>
+              </main>
+            </div>
+          );
+        }
+
+        const root = tragedies =订购ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
