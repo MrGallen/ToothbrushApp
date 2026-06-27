@@ -1,0 +1,434 @@
+import React, { useState, useEffect, useRef } from 'react';
+
+export default function App() {
+  const [isRunning, setIsRunning] = useState(false);
+  const [seconds, setSeconds] = useState(0);
+  const [volume, setVolume] = useState(0.8);
+  const [showHelp, setShowHelp] = useState(false);
+  const [wakeLockSupported, setWakeLockSupported] = useState(false);
+  const [wakeLockActive, setWakeLockActive] = useState(false);
+  const [testBeepActive, setTestBeepActive] = useState(false);
+
+  // References for keeping track of timer, precise time, and audio elements
+  const timerRef = useRef(null);
+  const startTimeRef = useRef(null);
+  const accumulatedTimeRef = useRef(0);
+  const audioCtxRef = useRef(null);
+  const silentNodeRef = useRef(null);
+  const lastTriggeredSecondRef = useRef(-1);
+  const wakeLockRef = useRef(null);
+
+  // Detect Wake Lock API support
+  useEffect(() => {
+    if ('wakeLock' in navigator) {
+      setWakeLockSupported(true);
+    }
+  }, []);
+
+  // Initialize Audio Context and Keep-Alive silent loop
+  const initAudio = () => {
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    if (audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
+    }
+
+    // Keep-alive trick: Play a tiny, constant near-ultrasound or silent buffer node
+    // This convinces iOS and Android browsers that active media is playing,
+    // keeping the javascript timer thread running even if the screen turns off.
+    try {
+      if (!silentNodeRef.current) {
+        const buffer = audioCtxRef.current.createBuffer(1, 44100, 44100);
+        // Create an extremely low amplitude node that is inaudible but active
+        const source = audioCtxRef.current.createBufferSource();
+        source.buffer = buffer;
+        source.loop = true;
+        
+        const gainNode = audioCtxRef.current.createGain();
+        gainNode.gain.setValueAtTime(0.001, audioCtxRef.current.currentTime);
+        
+        source.connect(gainNode);
+        gainNode.connect(audioCtxRef.current.destination);
+        source.start();
+        silentNodeRef.current = source;
+      }
+    } catch (e) {
+      console.warn("Silent node keep-alive setup failed:", e);
+    }
+  };
+
+  // Sound generator
+  const triggerBeepSequence = (count, frequency = 880) => {
+    initAudio();
+    const ctx = audioCtxRef.current;
+    if (!ctx) return;
+
+    let now = ctx.currentTime;
+    const duration = 0.12; // Duration of each beep
+    const gap = 0.12;      // Gap between beeps
+
+    for (let i = 0; i < count; i++) {
+      const osc = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(frequency, now);
+
+      // Volume ramping to prevent clicks/pops
+      gainNode.gain.setValueAtTime(0, now);
+      gainNode.gain.linearRampToValueAtTime(volume, now + 0.02);
+      gainNode.gain.setValueAtTime(volume, now + duration - 0.02);
+      gainNode.gain.linearRampToValueAtTime(0, now + duration);
+
+      osc.connect(gainNode);
+      gainNode.connect(ctx.destination);
+
+      osc.start(now);
+      osc.stop(now + duration);
+
+      now += duration + gap;
+    }
+  };
+
+  // Manage Wake Lock
+  const requestWakeLock = async () => {
+    if (!wakeLockSupported) return;
+    try {
+      wakeLockRef.current = await navigator.wakeLock.request('screen');
+      setWakeLockActive(true);
+    } catch (err) {
+      console.warn(`Wake Lock failed: ${err.name}, ${err.message}`);
+      setWakeLockActive(false);
+    }
+  };
+
+  const releaseWakeLock = async () => {
+    if (wakeLockRef.current) {
+      try {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+        setWakeLockActive(false);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  };
+
+  // Master Start / Pause
+  const handleToggle = () => {
+    if (isRunning) {
+      // Pause
+      clearInterval(timerRef.current);
+      accumulatedTimeRef.current += Date.now() - startTimeRef.current;
+      setIsRunning(false);
+      releaseWakeLock();
+    } else {
+      // Start/Resume
+      initAudio();
+      triggerBeepSequence(1, 600); // Friendly low-start beep
+      startTimeRef.current = Date.now();
+      setIsRunning(true);
+      requestWakeLock();
+
+      timerRef.current = setInterval(() => {
+        const elapsedMs = accumulatedTimeRef.current + (Date.now() - startTimeRef.current);
+        const elapsedSecs = Math.floor(elapsedMs / 1000);
+        
+        setSeconds(elapsedSecs);
+        checkAndBeep(elapsedSecs);
+      }, 200);
+    }
+  };
+
+  // Reset
+  const handleReset = () => {
+    clearInterval(timerRef.current);
+    setIsRunning(false);
+    setSeconds(0);
+    accumulatedTimeRef.current = 0;
+    lastTriggeredSecondRef.current = -1;
+    releaseWakeLock();
+    if (silentNodeRef.current) {
+      try {
+        silentNodeRef.current.stop();
+      } catch (e) {}
+      silentNodeRef.current = null;
+    }
+  };
+
+  // Determine what sounds should play
+  const checkAndBeep = (currentSec) => {
+    if (currentSec === lastTriggeredSecondRef.current) return; // Prevent double-triggering inside the same second
+
+    if (currentSec <= 180) {
+      // Phase 1: 0 - 3 minutes (180s) -> every 30s
+      if (currentSec > 0 && currentSec % 30 === 0) {
+        const intervalsCount = Math.floor(currentSec / 30);
+        triggerBeepSequence(intervalsCount, 880); // Classic clean 880Hz A5 note
+        lastTriggeredSecondRef.current = currentSec;
+      }
+    } else {
+      // Phase 2: After 3 minutes (180s+) -> every 15s
+      const phase2Secs = currentSec - 180;
+      if (phase2Secs > 0 && phase2Secs % 15 === 0) {
+        const phase2IntervalsCount = Math.floor(phase2Secs / 15);
+        triggerBeepSequence(phase2IntervalsCount, 1200); // Energetic higher-pitched tone for extra-care
+        lastTriggeredSecondRef.current = currentSec;
+      }
+    }
+  };
+
+  // Test beep to let the user check their volume before starting
+  const handleTestBeep = () => {
+    setTestBeepActive(true);
+    triggerBeepSequence(3, 980);
+    setTimeout(() => setTestBeepActive(false), 800);
+  };
+
+  // Format Helper
+  const formatTime = (totalSecs) => {
+    const m = Math.floor(totalSecs / 60).toString().padStart(2, '0');
+    const s = (totalSecs % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
+
+  // Brushing Guide Data based on timeline
+  const getBrushingStep = (currentSecs) => {
+    if (currentSecs < 30) return { title: "Top-Right Outer Surfaces", progress: currentSecs / 30 };
+    if (currentSecs < 60) return { title: "Top-Left Outer Surfaces", progress: (currentSecs - 30) / 30 };
+    if (currentSecs < 90) return { title: "Bottom-Right Outer Surfaces", progress: (currentSecs - 60) / 30 };
+    if (currentSecs < 120) return { title: "Bottom-Left Outer Surfaces", progress: (currentSecs - 90) / 30 };
+    if (currentSecs < 150) return { title: "Top Chewing & Inner Surfaces", progress: (currentSecs - 120) / 30 };
+    if (currentSecs <= 180) return { title: "Bottom Chewing & Inner Surfaces", progress: (currentSecs - 150) / 30 };
+    // Phase 2: Extra detailing / Tongue / Floss
+    const phase2Secs = currentSecs - 180;
+    const progressOf15 = (phase2Secs % 15) / 15;
+    if (currentSecs < 210) return { title: "Phase 2: Tongue Scrape & Polish", progress: progressOf15 };
+    if (currentSecs < 240) return { title: "Phase 2: Roof of Mouth & Gums", progress: progressOf15 };
+    return { title: "Phase 2: Deep Custom Detailing!", progress: progressOf15 };
+  };
+
+  const brushingStep = getBrushingStep(seconds);
+  const isPhase2 = seconds > 180;
+
+  // Next beep indicator calculation
+  const getNextBeepInfo = () => {
+    if (seconds < 180) {
+      const nextTarget = Math.ceil((seconds + 0.1) / 30) * 30;
+      const count = nextTarget / 30;
+      return { time: formatTime(nextTarget), count, phrase: `${count} beep${count > 1 ? 's' : ''}` };
+    } else {
+      const nextTarget = 180 + Math.ceil(((seconds - 180) + 0.1) / 15) * 15;
+      const count = Math.floor((nextTarget - 180) / 15);
+      return { time: formatTime(nextTarget), count, phrase: `${count} high-pitch beep${count > 1 ? 's' : ''}` };
+    }
+  };
+
+  const nextBeep = getNextBeepInfo();
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between p-6 md:p-12 font-sans select-none">
+      {/* Top Header */}
+      <header className="flex justify-between items-center max-w-md mx-auto w-full mb-4">
+        <div className="flex items-center gap-3">
+          <div className="bg-cyan-500/10 p-2.5 rounded-2xl border border-cyan-500/20 text-cyan-400">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+            </svg>
+          </div>
+          <div>
+            <h1 className="font-extrabold text-xl tracking-tight text-white">AquaBeep</h1>
+            <p className="text-xs text-slate-400">Lock-Resistant Dental Timer</p>
+          </div>
+        </div>
+
+        <button 
+          onClick={() => setShowHelp(!showHelp)}
+          className="text-slate-400 hover:text-white transition-colors bg-slate-900 border border-slate-800 p-2.5 rounded-full"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+          </svg>
+        </button>
+      </header>
+
+      {/* Main Container */}
+      <main className="max-w-md mx-auto w-full flex-grow flex flex-col justify-center gap-6">
+        
+        {/* Help Panel */}
+        {showHelp && (
+          <div className="bg-slate-900 border border-cyan-500/20 rounded-3xl p-5 mb-2 shadow-xl text-sm leading-relaxed text-slate-300 animate-fadeIn">
+            <h3 className="font-bold text-white mb-2 flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-cyan-400 animate-ping"></span> 
+              Lock-Screen Protection
+            </h3>
+            <p className="mb-3">
+              Standard web apps freeze when your screen locks. AquaBeep prevents this in two ways:
+            </p>
+            <ul className="list-disc pl-5 space-y-1.5 text-xs text-slate-400 mb-4">
+              <li><strong>Wake Lock API:</strong> Stops your phone from putting the screen to sleep.</li>
+              <li><strong>Silent Loop Keep-Alive:</strong> Loops an inaudible sub-audio thread so the phone processes sound continuously, even if you manually press your power button to lock the screen.</li>
+            </ul>
+            <button 
+              onClick={() => setShowHelp(false)} 
+              className="w-full bg-slate-800 text-white font-medium py-2 rounded-xl border border-slate-700 hover:bg-slate-750"
+            >
+              Got it!
+            </button>
+          </div>
+        )}
+
+        {/* Status Indicators */}
+        <div className="flex gap-2 justify-center">
+          {wakeLockActive ? (
+            <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs px-3 py-1 rounded-full font-medium flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 bg-emerald-400 rounded-full animate-pulse" />
+              Wake Lock Active
+            </span>
+          ) : (
+            <span className="bg-amber-500/10 text-amber-400 border border-amber-500/20 text-xs px-3 py-1 rounded-full font-medium flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 bg-amber-400 rounded-full" />
+              Active Keep-Alive Loop
+            </span>
+          )}
+          {isPhase2 && (
+            <span className="bg-fuchsia-500/10 text-fuchsia-400 border border-fuchsia-500/20 text-xs px-3 py-1 rounded-full font-medium flex items-center gap-1.5">
+              Phase 2: 15s Mode
+            </span>
+          )}
+        </div>
+
+        {/* Visual Clock Display */}
+        <div className="relative flex flex-col items-center justify-center p-8 bg-slate-900/60 rounded-4xl border border-slate-800 shadow-2xl backdrop-blur-md">
+          {/* Circular Progress Bar background & accent ring */}
+          <div className="absolute inset-4 border border-dashed border-slate-800 rounded-full pointer-events-none" />
+          
+          <div className="text-center">
+            <span className={`text-xs uppercase tracking-widest font-bold ${isPhase2 ? 'text-fuchsia-400' : 'text-cyan-400'}`}>
+              {isPhase2 ? "Phase 2: Deep Detail" : "Phase 1: Brushing"}
+            </span>
+            <div className="text-7xl md:text-8xl font-black tracking-tight text-white my-2 font-mono drop-shadow-lg">
+              {formatTime(seconds)}
+            </div>
+            <div className="text-sm font-semibold text-slate-300 bg-slate-950/80 px-4 py-1.5 rounded-full border border-slate-800 inline-block max-w-[280px] overflow-hidden truncate">
+              {brushingStep.title}
+            </div>
+          </div>
+
+          {/* Individual Quadrant Step Progress Bar */}
+          <div className="w-full mt-6 bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
+            <div 
+              className={`h-full transition-all duration-300 rounded-full ${isPhase2 ? 'bg-fuchsia-500' : 'bg-cyan-500'}`}
+              style={{ width: `${brushingStep.progress * 100}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Navigation / Next Beep Preview & Setup */}
+        <div className="bg-slate-900/40 border border-slate-800/80 rounded-3xl p-4 flex justify-between items-center text-sm">
+          <div className="flex items-center gap-3">
+            <div className="bg-slate-950 p-2 rounded-xl text-slate-400">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-slate-400 text-xs">Next interval warning</p>
+              <p className="font-semibold text-white">{nextBeep.time} ({nextBeep.phrase})</p>
+            </div>
+          </div>
+          <div className="flex gap-1.5">
+            {[...Array(nextBeep.count > 4 ? 4 : nextBeep.count)].map((_, i) => (
+              <span 
+                key={i} 
+                className={`h-2.5 w-2.5 rounded-full ${isPhase2 ? 'bg-fuchsia-500 animate-pulse' : 'bg-cyan-500 animate-pulse'}`} 
+              />
+            ))}
+            {nextBeep.count > 4 && <span className="text-xs font-bold text-slate-400">+{nextBeep.count - 4}</span>}
+          </div>
+        </div>
+
+        {/* Master Control Board */}
+        <div className="flex gap-4 items-center">
+          <button
+            onClick={handleReset}
+            className="flex-1 bg-slate-900 hover:bg-slate-850 active:scale-95 text-slate-300 font-bold py-4 rounded-2xl border border-slate-800 transition-all flex items-center justify-center gap-2"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 15.21M21 21v-5h-5.172" />
+            </svg>
+            Reset
+          </button>
+
+          <button
+            onClick={handleToggle}
+            className={`flex-2 px-8 py-4 rounded-2xl font-black text-lg transition-all transform active:scale-95 flex items-center justify-center gap-3 ${
+              isRunning 
+                ? 'bg-rose-500 hover:bg-rose-600 text-white shadow-lg shadow-rose-500/20' 
+                : 'bg-cyan-400 hover:bg-cyan-300 text-slate-950 shadow-lg shadow-cyan-400/20'
+            }`}
+          >
+            {isRunning ? (
+              <>
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+                Pause
+              </>
+            ) : (
+              <>
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                </svg>
+                Start Brushing
+              </>
+            )}
+          </button>
+        </div>
+
+        {/* Volume & Audio Configuration */}
+        <div className="bg-slate-900/60 border border-slate-850 p-5 rounded-3xl flex flex-col gap-4">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-slate-400" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.414 0A5.982 5.982 0 0115 10a5.982 5.982 0 01-1.757 4.243 1 1 0 01-1.414-1.414A3.982 3.982 0 0013 10a3.982 3.982 0 00-1.172-2.828a1 1 0 010-1.414z" clipRule="evenodd" />
+              </svg>
+              <span className="font-bold text-slate-300">Tone Volume</span>
+            </div>
+            <span className="font-mono text-cyan-400 font-bold bg-slate-950 px-2.5 py-0.5 rounded-md border border-slate-800 text-xs">
+              {Math.round(volume * 100)}%
+            </span>
+          </div>
+
+          <div className="flex gap-4 items-center">
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={volume}
+              onChange={(e) => setVolume(parseFloat(e.target.value))}
+              className="flex-grow accent-cyan-400 h-2 bg-slate-950 rounded-lg cursor-pointer"
+            />
+            <button
+              onClick={handleTestBeep}
+              disabled={testBeepActive}
+              className="bg-slate-950 border border-slate-800 hover:border-slate-750 text-xs font-bold text-cyan-400 px-4 py-2 rounded-xl transition-all disabled:opacity-55 active:scale-95"
+            >
+              {testBeepActive ? "Beeping..." : "Test Audio"}
+            </button>
+          </div>
+        </div>
+
+      </main>
+
+      {/* Footer Instructions Info */}
+      <footer className="max-w-md mx-auto w-full text-center text-slate-500 text-xs mt-6 space-y-1">
+        <p>💡 Tip: Leave this page open in your browser. Its active audio loop will keep the countdown sounds firing even if your device auto-locks.</p>
+        <p>© AquaBeep WebApp. Precision Oral Health Companion.</p>
+      </footer>
+    </div>
+  );
+}
